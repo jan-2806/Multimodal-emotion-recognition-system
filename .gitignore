@@ -1,0 +1,25 @@
+.idea/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local environments
+.venv/
+venv/
+env/
+
+# Large raw and generated data
+RAVDESS dataset/
+processed_faces/
+
+# Trained models and generated training artifacts
+models/*.keras
+models/*.h5
+models/*.csv
+models/*.json
+models/*.png
+
+# OS/editor files
+.DS_Store
+Thumbs.db
