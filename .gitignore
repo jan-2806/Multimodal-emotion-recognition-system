@@ -12,6 +12,7 @@ env/
 # Large raw and generated data
 RAVDESS dataset/
 processed_faces/
+processed_audio/
 
 # Trained models and generated training artifacts
 models/*.keras

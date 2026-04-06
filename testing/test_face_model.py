@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 from collections import deque
 from pathlib import Path
 
@@ -9,11 +10,17 @@ import tensorflow as tf
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = PROJECT_ROOT / "models"
+TRAINING_DIR = PROJECT_ROOT / "training"
 BEST_MODEL_PATH = MODEL_DIR / "face_emotion_model_best.keras"
 FINAL_MODEL_PATH = MODEL_DIR / "face_emotion_model_final.keras"
 CLASS_NAMES_PATH = MODEL_DIR / "face_class_names.json"
 FACE_MARGIN = 0.15
 DEFAULT_TOP_K = 3
+
+if str(TRAINING_DIR) not in sys.path:
+    sys.path.insert(0, str(TRAINING_DIR))
+
+from train_face_model import sparse_categorical_focal_loss  # noqa: E402
 
 CASCADE_PATHS = [
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml",
@@ -84,7 +91,11 @@ def load_trained_model():
         )
 
     print(f"Loading model from: {model_path}")
-    model = tf.keras.models.load_model(model_path)
+    model = tf.keras.models.load_model(
+        model_path,
+        custom_objects={"loss": sparse_categorical_focal_loss()},
+        compile=False,
+    )
     input_shape = model.input_shape
     image_size = (int(input_shape[1]), int(input_shape[2]))
     return model, image_size

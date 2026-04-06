@@ -1,10 +1,16 @@
 import json
-import re
+import shutil
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import tensorflow as tf
-from sklearn.model_selection import train_test_split
+
+from face_data_utils import (
+    collect_image_records,
+    count_records_per_class,
+    make_dataset,
+    split_records_by_video,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "processed_faces"
@@ -12,82 +18,10 @@ MODEL_DIR = PROJECT_ROOT / "models"
 IMAGE_SIZE = (96, 96)
 BATCH_SIZE = 32
 INITIAL_EPOCHS = 10
-FINE_TUNE_EPOCHS = 6
-VALIDATION_SPLIT = 0.2
+FINE_TUNE_EPOCHS = 8
 SEED = 42
-AUTOTUNE = tf.data.AUTOTUNE
-FINE_TUNE_LAYERS = 30
-IMAGE_PATTERN = re.compile(r"^(Actor_\d+)_(\d{2}(?:-\d{2}){6})_(\d+)$")
-
-
-def parse_video_id(image_path):
-    match = IMAGE_PATTERN.match(image_path.stem)
-    if not match:
-        raise ValueError(f"Unexpected processed face filename: {image_path.name}")
-
-    actor_id = match.group(1)
-    video_id = match.group(2)
-    return f"{actor_id}__{video_id}"
-
-
-def collect_image_records():
-    class_names = sorted(path.name for path in DATA_DIR.iterdir() if path.is_dir())
-    if not class_names:
-        raise ValueError(f"No emotion folders found in: {DATA_DIR}")
-
-    records = []
-    for class_name in class_names:
-        class_dir = DATA_DIR / class_name
-        image_paths = sorted(path for path in class_dir.iterdir() if path.is_file())
-        if not image_paths:
-            raise ValueError(f"Emotion folder is empty: {class_dir}")
-
-        for image_path in image_paths:
-            records.append(
-                {
-                    "path": image_path,
-                    "label": class_name,
-                    "video_id": parse_video_id(image_path),
-                }
-            )
-
-    return records, class_names
-
-
-def split_records_by_video(records):
-    video_to_label = {}
-    for record in records:
-        video_id = record["video_id"]
-        label = record["label"]
-
-        if video_id in video_to_label and video_to_label[video_id] != label:
-            raise ValueError(f"Video {video_id} maps to multiple labels.")
-
-        video_to_label[video_id] = label
-
-    video_ids = sorted(video_to_label.keys())
-    video_labels = [video_to_label[video_id] for video_id in video_ids]
-
-    train_video_ids, validation_video_ids = train_test_split(
-        video_ids,
-        test_size=VALIDATION_SPLIT,
-        random_state=SEED,
-        stratify=video_labels,
-    )
-
-    train_video_ids = set(train_video_ids)
-    validation_video_ids = set(validation_video_ids)
-
-    train_records = [record for record in records if record["video_id"] in train_video_ids]
-    validation_records = [record for record in records if record["video_id"] in validation_video_ids]
-    return train_records, validation_records, len(video_ids), len(train_video_ids), len(validation_video_ids)
-
-
-def count_records_per_class(records, class_names):
-    counts = {class_name: 0 for class_name in class_names}
-    for record in records:
-        counts[record["label"]] += 1
-    return counts
+FINE_TUNE_LAYERS = 45
+FOCAL_GAMMA = 1.5
 
 
 def compute_class_weights(class_names, class_counts):
@@ -102,28 +36,6 @@ def compute_class_weights(class_names, class_counts):
     return class_weights
 
 
-def load_image(path, label):
-    image = tf.io.read_file(path)
-    image = tf.image.decode_jpeg(image, channels=1)
-    image = tf.image.resize(image, IMAGE_SIZE)
-    image = tf.cast(image, tf.float32)
-    return image, label
-
-
-def make_dataset(records, class_names, training):
-    class_to_index = {class_name: index for index, class_name in enumerate(class_names)}
-    paths = [str(record["path"]) for record in records]
-    labels = [class_to_index[record["label"]] for record in records]
-
-    dataset = tf.data.Dataset.from_tensor_slices((paths, labels))
-    if training:
-        dataset = dataset.shuffle(len(paths), seed=SEED, reshuffle_each_iteration=True)
-
-    dataset = dataset.map(load_image, num_parallel_calls=AUTOTUNE)
-    dataset = dataset.batch(BATCH_SIZE).prefetch(AUTOTUNE)
-    return dataset
-
-
 def build_model(num_classes):
     augmentation = tf.keras.Sequential(
         [
@@ -131,7 +43,7 @@ def build_model(num_classes):
             tf.keras.layers.RandomRotation(0.08),
             tf.keras.layers.RandomZoom(0.12),
             tf.keras.layers.RandomTranslation(0.08, 0.08),
-            tf.keras.layers.RandomContrast(0.1),
+            tf.keras.layers.RandomContrast(0.12),
         ],
         name="augmentation",
     )
@@ -161,33 +73,109 @@ def build_model(num_classes):
     pooled = tf.keras.layers.GlobalAveragePooling2D()(features)
     dropped = tf.keras.layers.Dropout(0.35)(pooled)
     dense = tf.keras.layers.Dense(
-        128,
+        192,
         activation="relu",
-        kernel_regularizer=tf.keras.regularizers.l2(1e-4),
+        kernel_regularizer=tf.keras.regularizers.l2(2e-4),
     )(dropped)
     normalized_dense = tf.keras.layers.BatchNormalization()(dense)
-    dropped_dense = tf.keras.layers.Dropout(0.3)(normalized_dense)
+    dropped_dense = tf.keras.layers.Dropout(0.35)(normalized_dense)
     outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(dropped_dense)
 
     model = tf.keras.Model(inputs=inputs, outputs=outputs, name="face_emotion_mobilenet")
     return model, base_model
 
 
-def compile_model(model, learning_rate):
-    try:
-        loss = tf.keras.losses.SparseCategoricalCrossentropy(label_smoothing=0.05)
-    except TypeError:
-        print("SparseCategoricalCrossentropy label_smoothing is unavailable in this TensorFlow version. Using the standard sparse categorical loss instead.")
-        loss = tf.keras.losses.SparseCategoricalCrossentropy()
+def sparse_categorical_focal_loss(gamma=FOCAL_GAMMA):
+    def loss(y_true, y_pred):
+        y_true = tf.cast(tf.reshape(y_true, [-1]), tf.int32)
+        y_true_one_hot = tf.one_hot(y_true, depth=tf.shape(y_pred)[-1])
+        y_pred = tf.clip_by_value(y_pred, tf.keras.backend.epsilon(), 1.0 - tf.keras.backend.epsilon())
+        cross_entropy = -y_true_one_hot * tf.math.log(y_pred)
+        focal_weight = tf.pow(1.0 - y_pred, gamma)
+        loss_value = tf.reduce_sum(focal_weight * cross_entropy, axis=-1)
+        return tf.reduce_mean(loss_value)
 
+    return loss
+
+
+def compile_model(model, learning_rate):
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
-        loss=loss,
+        loss=sparse_categorical_focal_loss(),
         metrics=["accuracy"],
     )
 
 
+class BestMetricTracker(tf.keras.callbacks.Callback):
+    def __init__(self, metadata_path):
+        super().__init__()
+        self.metadata_path = Path(metadata_path)
+        if self.metadata_path.exists():
+            with open(self.metadata_path, "r", encoding="utf-8") as file:
+                metadata = json.load(file)
+            self.best_val_accuracy = float(metadata.get("best_val_accuracy", float("-inf")))
+        else:
+            self.best_val_accuracy = float("-inf")
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        current_val_accuracy = logs.get("val_accuracy")
+        if current_val_accuracy is None:
+            return
+
+        if current_val_accuracy > self.best_val_accuracy:
+            self.best_val_accuracy = float(current_val_accuracy)
+            with open(self.metadata_path, "w", encoding="utf-8") as file:
+                json.dump(
+                    {
+                        "best_val_accuracy": self.best_val_accuracy,
+                        "best_epoch_1_based": epoch + 1,
+                    },
+                    file,
+                    indent=2,
+                )
+
+
+class GlobalBestModelCheckpoint(tf.keras.callbacks.Callback):
+    def __init__(self, filepath, metadata_path):
+        super().__init__()
+        self.filepath = Path(filepath)
+        self.metadata_path = Path(metadata_path)
+        if self.metadata_path.exists():
+            with open(self.metadata_path, "r", encoding="utf-8") as file:
+                metadata = json.load(file)
+            self.best_val_accuracy = float(metadata.get("best_val_accuracy", float("-inf")))
+        else:
+            self.best_val_accuracy = float("-inf")
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        current_val_accuracy = logs.get("val_accuracy")
+        if current_val_accuracy is None:
+            return
+
+        if current_val_accuracy > self.best_val_accuracy:
+            self.best_val_accuracy = float(current_val_accuracy)
+            print(f"\nEpoch {epoch + 1}: val_accuracy improved to {self.best_val_accuracy:.5f}, saving global best model.")
+            self.model.save(self.filepath)
+            with open(self.metadata_path, "w", encoding="utf-8") as file:
+                json.dump(
+                    {
+                        "best_val_accuracy": self.best_val_accuracy,
+                        "best_epoch_1_based": epoch + 1,
+                    },
+                    file,
+                    indent=2,
+                )
+        else:
+            print(
+                f"\nEpoch {epoch + 1}: val_accuracy did not improve from "
+                f"{self.best_val_accuracy:.5f}"
+            )
+
+
 def create_callbacks(log_append):
+    metadata_path = MODEL_DIR / "face_best_metrics.json"
     return [
         tf.keras.callbacks.EarlyStopping(
             monitor="val_loss",
@@ -201,12 +189,11 @@ def create_callbacks(log_append):
             min_lr=1e-6,
             verbose=1,
         ),
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath=str(MODEL_DIR / "face_emotion_model_best.keras"),
-            monitor="val_accuracy",
-            save_best_only=True,
-            verbose=1,
+        GlobalBestModelCheckpoint(
+            filepath=MODEL_DIR / "face_emotion_model_best.keras",
+            metadata_path=metadata_path,
         ),
+        BestMetricTracker(metadata_path=metadata_path),
         tf.keras.callbacks.CSVLogger(str(MODEL_DIR / "face_training_log.csv"), append=log_append),
     ]
 
@@ -267,14 +254,26 @@ def save_training_artifacts(final_model, history, class_names, train_counts, val
     plot_training_history(history)
 
 
+def reset_best_checkpoint_state():
+    for path in [
+        MODEL_DIR / "face_best_metrics.json",
+        MODEL_DIR / "face_emotion_model_best.keras",
+        MODEL_DIR / "face_emotion_model_phase1_best.keras",
+        MODEL_DIR / "face_emotion_model_phase2_best.keras",
+    ]:
+        if path.exists():
+            path.unlink()
+
+
 def main():
     if not DATA_DIR.exists():
         raise FileNotFoundError(f"Processed faces directory not found: {DATA_DIR}")
 
     tf.keras.utils.set_random_seed(SEED)
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    reset_best_checkpoint_state()
 
-    records, class_names = collect_image_records()
+    records, class_names = collect_image_records(DATA_DIR)
     train_records, validation_records, total_videos, train_videos, validation_videos = split_records_by_video(records)
     train_counts = count_records_per_class(train_records, class_names)
     validation_counts = count_records_per_class(validation_records, class_names)
@@ -296,11 +295,11 @@ def main():
     print("\nClass names:", class_names)
     print("Class weights:", class_weights)
 
-    train_dataset = make_dataset(train_records, class_names, training=True)
-    validation_dataset = make_dataset(validation_records, class_names, training=False)
+    train_dataset = make_dataset(train_records, class_names, IMAGE_SIZE, BATCH_SIZE, training=True, shuffle_seed=SEED)
+    validation_dataset = make_dataset(validation_records, class_names, IMAGE_SIZE, BATCH_SIZE, training=False)
 
     model, base_model = build_model(num_classes=len(class_names))
-    compile_model(model, learning_rate=1e-3)
+    compile_model(model, learning_rate=8e-4)
     model.summary()
 
     print("\nPhase 1: training classification head")
@@ -313,12 +312,18 @@ def main():
         verbose=2,
     )
 
+    if (MODEL_DIR / "face_emotion_model_best.keras").exists():
+        shutil.copy2(
+            MODEL_DIR / "face_emotion_model_best.keras",
+            MODEL_DIR / "face_emotion_model_phase1_best.keras",
+        )
+
     print("\nPhase 2: fine-tuning top MobileNetV2 layers")
     base_model.trainable = True
     for layer in base_model.layers[:-FINE_TUNE_LAYERS]:
         layer.trainable = False
 
-    compile_model(model, learning_rate=1e-5)
+    compile_model(model, learning_rate=5e-6)
     fine_tune_history = model.fit(
         train_dataset,
         validation_data=validation_dataset,
@@ -329,8 +334,19 @@ def main():
         verbose=2,
     )
 
+    if (MODEL_DIR / "face_emotion_model_best.keras").exists():
+        shutil.copy2(
+            MODEL_DIR / "face_emotion_model_best.keras",
+            MODEL_DIR / "face_emotion_model_phase2_best.keras",
+        )
+
     full_history = merge_histories(initial_history, fine_tune_history)
-    best_model = tf.keras.models.load_model(MODEL_DIR / "face_emotion_model_best.keras")
+    best_model = tf.keras.models.load_model(
+        MODEL_DIR / "face_emotion_model_best.keras",
+        custom_objects={"loss": sparse_categorical_focal_loss()},
+        compile=False,
+    )
+    compile_model(best_model, learning_rate=5e-6)
     validation_loss, validation_accuracy = best_model.evaluate(validation_dataset, verbose=0)
     print(f"\nBest checkpoint validation loss: {validation_loss:.4f}")
     print(f"Best checkpoint validation accuracy: {validation_accuracy:.4f}")
@@ -341,6 +357,9 @@ def main():
         "batch_size": BATCH_SIZE,
         "initial_epochs": INITIAL_EPOCHS,
         "fine_tune_epochs": FINE_TUNE_EPOCHS,
+        "fine_tune_layers": FINE_TUNE_LAYERS,
+        "loss": "sparse_focal_loss",
+        "focal_gamma": FOCAL_GAMMA,
         "total_source_videos": total_videos,
         "training_videos": train_videos,
         "validation_videos": validation_videos,
