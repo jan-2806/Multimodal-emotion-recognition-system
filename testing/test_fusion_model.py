@@ -1,14 +1,9 @@
 import argparse
-import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-TESTING_DIR = PROJECT_ROOT / "testing"
+import numpy as np
 
-if str(TESTING_DIR) not in sys.path:
-    sys.path.insert(0, str(TESTING_DIR))
-
-from fusion_utils import (  # noqa: E402
+from fusion_utils import (
     DEFAULT_AUDIO_WEIGHT,
     DEFAULT_FACE_WEIGHT,
     fuse_probabilities,
@@ -21,34 +16,36 @@ from fusion_utils import (  # noqa: E402
     summarize_probabilities,
 )
 
+DEFAULT_TOP_K = 3
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run the multimodal emotion recognition system on a video file."
+        description="Run multimodal late-fusion emotion prediction on a video file."
     )
     parser.add_argument(
         "--video",
         type=str,
         required=True,
-        help="Path to an MP4 video containing both face and speech information.",
+        help="Path to an MP4 video containing both face and audio information.",
     )
     parser.add_argument(
         "--face-weight",
         type=float,
         default=None,
-        help="Optional face fusion weight override.",
+        help="Optional face weight override for fusion. Defaults to the saved fusion config.",
     )
     parser.add_argument(
         "--audio-weight",
         type=float,
         default=None,
-        help="Optional audio fusion weight override.",
+        help="Optional audio weight override for fusion. Defaults to 1 - face_weight or the saved config.",
     )
     parser.add_argument(
         "--frame-step",
         type=int,
         default=5,
-        help="Process every Nth frame for the face branch.",
+        help="Process every Nth video frame for face inference.",
     )
     parser.add_argument(
         "--max-faces",
@@ -59,28 +56,28 @@ def parse_args():
     parser.add_argument(
         "--top-k",
         type=int,
-        default=3,
-        help="How many top predictions to display.",
+        default=DEFAULT_TOP_K,
+        help="How many top probabilities to print per modality.",
     )
     return parser.parse_args()
 
 
-def print_prediction_block(title, predictions):
+def print_prediction_block(title, top_predictions):
     print(f"\n{title}")
-    for class_name, probability in predictions:
+    for class_name, probability in top_predictions:
         print(f"  {class_name}: {probability:.4f}")
 
 
-def resolve_weights(face_weight, audio_weight):
-    if face_weight is None and audio_weight is None:
+def resolve_weights(args):
+    if args.face_weight is None and args.audio_weight is None:
         config = load_fusion_config()
         return float(config.get("face_weight", DEFAULT_FACE_WEIGHT)), float(
             config.get("audio_weight", DEFAULT_AUDIO_WEIGHT)
         )
 
-    resolved_face_weight = DEFAULT_FACE_WEIGHT if face_weight is None else face_weight
-    resolved_audio_weight = (1.0 - resolved_face_weight) if audio_weight is None else audio_weight
-    return resolved_face_weight, resolved_audio_weight
+    face_weight = DEFAULT_FACE_WEIGHT if args.face_weight is None else args.face_weight
+    audio_weight = (1.0 - face_weight) if args.audio_weight is None else args.audio_weight
+    return face_weight, audio_weight
 
 
 def main():
@@ -92,7 +89,7 @@ def main():
     class_names = load_class_names()
     face_model = load_face_model()
     audio_model = load_audio_model()
-    face_weight, audio_weight = resolve_weights(args.face_weight, args.audio_weight)
+    face_weight, audio_weight = resolve_weights(args)
 
     face_probabilities, face_count = predict_face_probabilities_from_video(
         face_model,
@@ -108,31 +105,30 @@ def main():
         audio_weight=audio_weight,
     )
 
-    face_predictions = (
+    face_top = (
         summarize_probabilities(class_names, face_probabilities, args.top_k)
         if face_probabilities is not None
         else []
     )
-    audio_predictions = summarize_probabilities(class_names, audio_probabilities, args.top_k)
-    fused_predictions = summarize_probabilities(class_names, fused_probabilities, args.top_k)
+    audio_top = summarize_probabilities(class_names, audio_probabilities, args.top_k)
+    fused_top = summarize_probabilities(class_names, fused_probabilities, args.top_k)
 
-    final_label, final_confidence = fused_predictions[0]
+    final_label, final_confidence = fused_top[0]
 
-    print("Emotion Recognition System (Multimodal Fusion)")
     print(f"Input video: {video_path}")
     print(f"Face samples used: {face_count}")
     print(f"Fusion weights -> face: {face_weight:.2f}, audio: {audio_weight:.2f}")
-    print(f"\nFinal emotion: {final_label}")
+    print(f"\nFinal fused prediction: {final_label}")
     print(f"Final confidence: {final_confidence:.2%}")
 
-    if face_predictions:
-        print_prediction_block("Face branch:", face_predictions)
+    if face_top:
+        print_prediction_block("Face-only top predictions:", face_top)
     else:
-        print("\nFace branch:")
-        print("  No usable face detections were found. Fusion used the audio branch only.")
+        print("\nFace-only top predictions:")
+        print("  No usable face detections were found. Fusion fell back to audio.")
 
-    print_prediction_block("Audio branch:", audio_predictions)
-    print_prediction_block("Fused prediction:", fused_predictions)
+    print_prediction_block("Audio-only top predictions:", audio_top)
+    print_prediction_block("Fusion top predictions:", fused_top)
 
 
 if __name__ == "__main__":
