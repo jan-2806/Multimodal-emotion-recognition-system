@@ -1,79 +1,166 @@
-# Emotion Recognition System using Multimodal Deep Learning
+# Emotion AI: Multimodal Emotion Recognition System
 
-This project aims to detect human emotions using:
+## Overview
 
-- facial expressions from video frames
-- voice patterns from audio
+Emotion AI is a **multimodal deep learning system** designed to detect human emotions by analyzing both **facial expressions (video frames)** and **speech signals (audio)**. By combining these two modalities using a **late fusion approach**, the system improves prediction accuracy, robustness, and real-world applicability.
 
-The long-term goal is a multimodal emotion recognition system that combines both face and audio predictions.
+This project follows a modular pipeline including preprocessing, feature extraction, independent predictions, and fusion, making it scalable and easy to extend.
 
-## Current Progress
+---
 
-The project has completed the face-preprocessing and face-model baseline stages.
+## Features
 
-Completed so far:
+* **Multimodal Learning (Face + Audio):** Combines visual and audio cues to improve emotion recognition accuracy and reliability compared to single-modality systems.
+* **Face Emotion Recognition:** Utilizes MobileNetV2 with transfer learning to extract deep spatial features from facial expressions, enabling accurate classification even with limited data.
+* **Audio Emotion Recognition:** Leverages YAMNet pretrained embeddings to capture meaningful acoustic patterns such as tone, pitch, and intensity from speech signals.
+* **Late Fusion Mechanism:** Integrates probability outputs from both face and audio models using weighted fusion, enhancing overall prediction robustness.
+* **Efficient Preprocessing Pipeline:** Includes face detection, cropping, resizing, and audio normalization to ensure consistent and high-quality inputs.
+* **Real-Time Inference Support:** Supports testing using webcam (face) and microphone (audio) inputs for practical, real-world usage.
+* **Modular Architecture:** Each component (preprocessing, feature extraction, prediction, fusion) is independently designed, allowing easy updates and scalability.
 
-- extracted face images from the RAVDESS video dataset
-- organized extracted faces into emotion-wise folders
-- built a face-only training pipeline
-- added a face-model testing script for image and webcam input
+---
 
-Current emotion classes:
+## Installation
 
-- angry
-- calm
-- disgust
-- fear
-- happy
-- neutral
-- sad
-- surprise
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/jan-2806/Multimodal-emotion-recognition-system.git
+cd Multimodal-emotion-recognition-system
+```
+
+### 2. Create Virtual Environment
+
+```bash
+conda create -n emotion_ai python=3.10
+conda activate emotion_ai
+```
+
+### 3. Install Dependencies
+
+```bash
+pip install tensorflow opencv-python numpy matplotlib scikit-learn pandas
+```
+
+---
+
+## Usage
+
+### 1. Preprocess Data
+
+Extract faces from video dataset:
+
+```bash
+python data_processing/extract_faces.py
+```
+### 2. Preprocess audio
+
+```bash
+python data_processing/extract_audio_features.py
+```
+
+### 3. Train Models
+
+Train face and audio models:
+
+```bash
+python training/train_face_model.py
+python training/train_audio_model.py
+```
+
+### 4. Test Models
+
+Run predictions using trained models:
+
+```bash
+python testing/test_face_model.py
+python testing/test_audio_model.py
+```
+
+### 5. Multimodal Fusion
+
+Combine predictions from both models:
+
+```bash
+python testing/evaluate_fusion_model.py
+python testing/test_fusion_model.py
+```
+
+---
+
+## Methodology
+
+The system follows a structured pipeline:
+
+1. **Input**: Video containing face and audio
+2. **Preprocessing**:
+
+   * Face: detection, cropping, resizing (48×48 grayscale)
+   * Audio: extraction, normalization, fixed-length processing
+3. **Feature Extraction**:
+
+   * Face: MobileNetV2
+   * Audio: YAMNet embeddings
+4. **Prediction**:
+
+   * Independent emotion classification
+5. **Fusion**:
+
+   * Late fusion of probabilities for final output
+
+---
+
+## Emotion Classes
+
+* 01: Neutral
+* 02: Calm
+* 03: Happy
+* 04: Sad
+* 05: Angry
+* 06: Fearful
+* 07: Disgust
+* 08: Surprised 
+
+---
 
 ## Project Structure
 
-```text
-Emotion Recognition
+```
+Multimodal-emotion-recognition-system
 ├── data_processing/
-│   └── extract_faces.py
 ├── training/
-│   └── train_face_model.py
 ├── testing/
-│   └── test_face_model.py
 ├── models/
 ├── processed_faces/
+├── processed_audio/
 ├── RAVDESS dataset/
-└── main.py
+├── main.py
+├── README.md
+└── .gitignore
 ```
 
-## Environment
+---
 
-Recommended setup:
+## License
 
-- PyCharm
-- Anaconda / Conda environment
-- Python 3.10
+This project is licensed for **academic and research purposes**. For other uses, please contact the author.
 
-Suggested environment name:
+---
 
-- `emotion_ai`
+## Contact
 
-Main libraries used:
+**Author:** Janani
 
-- TensorFlow / Keras
-- OpenCV
-- NumPy
-- Matplotlib
-- scikit-learn
-- pandas
+For questions, suggestions, or collaboration opportunities, feel free to reach out via GitHub.
 
-## Dataset
+---
 
-This project uses the **RAVDESS** dataset for facial emotion extraction and training.
+## Acknowledgements
 
-The raw dataset and generated face images are intentionally excluded from GitHub because they are large generated assets and should be stored locally.
+* RAVDESS Dataset
+* TensorFlow & Keras
+* OpenCV
 
-## Notes
+---
 
-- This repository currently focuses on the face-only pipeline.
-- Audio modeling and multimodal fusion are planned next.
-- Trained model files are not committed by default.
+⭐ If you find this project useful, consider giving it a star!
